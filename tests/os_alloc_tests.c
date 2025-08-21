@@ -21,7 +21,8 @@ int main(int argc, char *argv[]) {
         (64 * 1024) + 1,
     };
 
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    size_t ncases = sizeof(cases) / sizeof(cases[0]);
+    for (size_t i = 0; i < ncases; i++) {
         size_t requested = cases[i];
         size_t expected = round_up_pages(requested, ps);
 

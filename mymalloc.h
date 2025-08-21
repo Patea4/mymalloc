@@ -2,7 +2,6 @@
 #define MYMALLOC_H
 
 #include <stddef.h>
-#include <unistd.h>
 
 void *malloc(size_t size);
 
