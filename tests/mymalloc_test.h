@@ -25,3 +25,9 @@ Block *mymalloc_test_split(Block *block, size_t total);
 Block *mymalloc_test_free_head(void);
 
 void mymalloc_test_reset(void);
+
+size_t mymalloc_test_block_size_of_payload(void *payload);
+size_t mymalloc_test_free_head_size(void);
+
+size_t mymalloc_test_hdrsize(void);
+size_t mymalloc_test_min_block(void);

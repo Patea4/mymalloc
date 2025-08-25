@@ -7,7 +7,7 @@ static size_t round_up_pages(size_t n, size_t ps) {
     return ((n + ps - 1) / ps) * ps;
 }
 
-int main(int argc, char *argv[]) {
+int main(void) {
 
     size_t ps = mymalloc_test_pagesize();
     const size_t cases[] = {

@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <string.h>
 
 #define ALIGN 16
 #define CHUNK_SIZE (64 * 1024)
@@ -27,6 +28,8 @@ typedef struct Block {
     size_t size; // Total size of block including header.
     struct Block *next;
 } Block;
+
+#define HDRSIZE ((size_t)((sizeof(Block) + (ALIGN - 1)) & ~(ALIGN - 1)))
 
 static size_t g_pagesize = 0;
 static Block *g_free_head = NULL;
@@ -58,7 +61,7 @@ static void *align_ptr(void *p, size_t a) {
 static Block *request_space(size_t size) {
     size_t pagesize = get_pagesize_cached();
 
-    size_t total = sizeof(Chunk) + sizeof(Block) + size;
+    size_t total = sizeof(Chunk) + HDRSIZE + size;
     total = round_up(total, CHUNK_SIZE);
     total = round_up(total, pagesize);
 
@@ -78,14 +81,14 @@ static Block *request_space(size_t size) {
     // Find position after chunk header, then reserve space for
     // block header. Then align the end of block head to start payload.
     char *after_header = (char *)(chunk + 1);
-    char *aligned_block = (char *)align_ptr(after_header + sizeof(Block), ALIGN);
+    char *aligned_block = (char *)align_ptr(after_header + HDRSIZE, ALIGN);
 
     // Calculate the total size that the block header and padding took.
     size_t padding = (size_t)(aligned_block - after_header);
 
     // Place first block in memory after the Chunk Header and aligned.
-    Block *b = (Block *)(aligned_block - sizeof(Block));
-    b->size = total - sizeof(Chunk) - padding;
+    Block *b = (Block *)(aligned_block - HDRSIZE);
+    b->size = total - sizeof(Chunk) - padding + HDRSIZE;
     b->next = g_free_head;
     g_free_head = b;
 
@@ -107,7 +110,7 @@ static Block *request_space(size_t size) {
  */
 static Block *split(Block *block, size_t total) {
     // Enough size for the request, and also to split it
-    if (block->size > total + sizeof(Block)) {
+    if (block->size >= total + HDRSIZE + MIN_BLOCK) {
         Block *new = (Block *)((char *)block + total);
         new->size = block->size - total;
         new->next = block->next;
@@ -122,21 +125,26 @@ static Block *split(Block *block, size_t total) {
     return NULL;
 }
 
+/*
+ * Finds the next free block using LIFO for the requested
+ * size passed in through *payload_size*. Removing it
+ * from the free list.
+ *
+ * Args:
+ *  payload_size: the bytes that need to be allocated
+ * Returns:
+ *  The first block found with enough space for the request.
+ *  NULL if no block is found
+ */
 static Block *find_free_block(size_t payload_size) {
     payload_size = round_up(payload_size, ALIGN);
-    size_t need = payload_size + sizeof(Block);
+    size_t need = payload_size + HDRSIZE;
 
     Block *current = g_free_head;
     Block *prev = NULL;
 
     while (current) {
-        if (current->size == need) {
-            if (prev)
-                prev->next = current->next;
-            else
-                g_free_head = current->next;
-            return current;
-        } else if (current->size > need) {
+        if (current->size >= need) {
             Block *new = split(current, need);
             if (new == NULL) {
                 if (prev)
@@ -150,29 +158,13 @@ static Block *find_free_block(size_t payload_size) {
                     g_free_head = new;
             }
             return current;
-        } else {
-            prev = current;
-            current = current->next;
         }
+        prev = current;
+        current = current->next;
     }
 
     return NULL;
 }
-
-/*void *malloc(size_t size) {*/
-/*    if (size <= 0) {*/
-/*        return NULL;*/
-/*    }*/
-/**/
-/*    // Heap has not been initialized*/
-/*    if (!g_free_head) {*/
-/*        if (request_space(size) == NULL) {*/
-/*            return NULL;*/
-/*        }*/
-/*    }*/
-/**/
-/*    return NULL;*/
-/*}*/
 
 /*
  * Caches the pagesize for the system
@@ -247,6 +239,71 @@ static int os_release(void *ptr, size_t nbytes) {
     return munmap(ptr, size);
 }
 
+void *malloc(size_t size) {
+    if (size <= 0) {
+        return NULL;
+    }
+
+    Block *block;
+
+    while ((block = find_free_block(size)) == NULL) {
+        if (request_space(size) == NULL) {
+            return NULL;
+        }
+    }
+
+    return (char *)block + HDRSIZE;
+}
+
+void free(void *ptr) {
+    if (!ptr) {
+        return;
+    }
+
+    Block *block = (Block *)((char *)ptr - HDRSIZE);
+
+    block->next = g_free_head;
+    g_free_head = block;
+}
+
+void *realloc(void *ptr, size_t size) {
+    if (ptr == NULL) {
+        return malloc(size);
+    }
+    if (size == 0) {
+        free(ptr);
+        return NULL;
+    }
+
+    Block *oldb = (Block *)((char *)ptr - HDRSIZE);
+    size_t old_total = oldb->size;
+    size_t old_payload = (old_total >= HDRSIZE) ? (old_total - HDRSIZE) : 0;
+
+    void *newp = malloc(size);
+    if (!newp)
+        return NULL;
+
+    size_t to_copy = old_payload < size ? old_payload : size;
+    if (to_copy)
+        memcpy(newp, ptr, to_copy);
+
+    free(ptr);
+    return newp;
+}
+
+void *calloc(size_t n, size_t sz) {
+    if (n && sz > (SIZE_MAX / n)) {
+        return NULL;
+    }
+    size_t total = n * sz;
+
+    void *p = malloc(total);
+    if (!p)
+        return NULL;
+    memset(p, 0, total);
+    return p;
+}
+
 // Helper functions to be defined when testing.
 #ifdef MYMALLOC_TESTING
 void *mymalloc_test_os_alloc(size_t n) { return os_alloc(n); }
@@ -270,5 +327,16 @@ void mymalloc_test_reset(void) {
     g_free_head = NULL;
     g_pagesize = 0;
 }
+
+size_t mymalloc_test_block_size_of_payload(void *payload) {
+    Block *b = (Block *)((char *)payload - HDRSIZE);
+    return b->size;
+}
+size_t mymalloc_test_free_head_size(void) {
+    return g_free_head ? g_free_head->size : 0;
+}
+
+size_t mymalloc_test_hdrsize(void) { return HDRSIZE; }
+size_t mymalloc_test_min_block(void) { return MIN_BLOCK; }
 
 #endif
